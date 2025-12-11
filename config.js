@@ -8,6 +8,7 @@ export default {
     "private_key": process.env.PRIVATE_KEY,
     "account_type": process.env.ACCOUNT_TYPE || 'simple',
     "contract_address": "0x66519FCAee1Ed65bc9e0aCc25cCD900668D3eD49",
+    "erc20_contract_address": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
     "function_name": "mintTo",
     "entry_point": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
     "entry_point_version": "0.7"

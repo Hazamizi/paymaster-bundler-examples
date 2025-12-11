@@ -6,13 +6,15 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "node src/mint"
+    "dev": "node src/mint",
+    "dev-eoa": "node src/mint_eoa"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
     "npm": "^10.9.0",
+    "permissionless": "^0.2.42",
     "typescript": "^5.6.3",
-    "viem": "2.x"
+    "viem": "^2.33.3"
   }
 }

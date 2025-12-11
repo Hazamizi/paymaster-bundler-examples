@@ -1,4 +1,5 @@
-import { encodeFunctionData, http } from 'viem'
+import { encodeFunctionData, http , parseAbi} from 'viem'
+
 import { baseSepolia } from 'viem/chains'
 import { createSmartAccountClient } from 'permissionless'
 import { createPimlicoClient } from "permissionless/clients/pimlico";
@@ -8,8 +9,9 @@ import config from '../../../config.js';
 
 // Get yours at https://www.coinbase.com/cloud/products/base/rpc
 const rpcUrl = config.rpc_url
-const contractAddress = config.contract_address;
-
+const tokenAddress = "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+const paymasterAddress = "0xdCBE0C1A00e4Cf24AE77c52125e6e6b4F7C6Db4e"
+const tokenAmount = 10000000000;
 // Create the Cloud Paymaster
 const cloudPaymaster = createPimlicoClient({
     chain: baseSepolia,
@@ -27,27 +29,56 @@ const smartAccountClient = createSmartAccountClient({
     account,
     chain: baseSepolia,
     bundlerTransport: http(rpcUrl),
-    // IMPORTANT: Set up the Cloud Paymaster to sponsor your transaction
-    paymaster: cloudPaymaster
 });
 
 // Encode the calldata
-const callData = encodeFunctionData({
-    abi: abi,
-    functionName: config.function_name,
-    args: [smartAccountClient.account.address, 0],
-});
+const approve = {
+    to: tokenAddress,
+    data: encodeFunctionData({
+        abi: parseAbi(["function approve(address,uint)"]),
+        functionName: "approve",
+        args: [paymasterAddress, tokenAmount],
+    })
+  }
 console.log("\x1b[33m%s\x1b[0m", `Minting to ${account.address} (Account type: ${config.account_type})`);
 console.log("Waiting for transaction...")
+const calls = [approve]
+
+const uo = await smartAccountClient.prepareUserOperation({
+    account,
+    calls,
+    paymaster: false
+  }); 
+
+  console.log(uo)
 
 // Send the sponsored transaction!
-const txHash = await smartAccountClient.sendTransaction({
-    account: smartAccountClient.account,
-    to: contractAddress,
-    data: callData,
-    value: BigInt(0),
-});
+account.userOperation = {
+    estimateGas: async (userOperation) => {
+      const estimate = await smartAccountClient.estimateUserOperationGas(userOperation);
+      // adjust preVerification upward 
+      estimate.preVerificationGas = estimate.preVerificationGas * 2n;
+      return estimate;
+    },
+  };
 
-console.log("\x1b[32m", `⛽ Successfully sponsored gas for ${config.function_name} transaction with Coinbase Developer Platform!`);
-console.log("\x1b[36m", `🔍 View on Etherscan: https://sepolia.basescan.org/tx/${txHash}`);
-process.exit(0)
+  try {
+    const uo = await smartAccountClient.prepareUserOperation({
+      account,
+      calls,
+      paymaster: false
+    });
+    console.log(uo)
+  
+    // const receipt = await smartAccountClient.waitForUserOperationReceipt({
+    //   hash: userOpHash,
+    // });
+  
+    console.log("✅ Transaction successfully sponsored!");
+    console.log(`⛽ View sponsored UserOperation on blockscout: https://base-sepolia.blockscout.com/op/${receipt.userOpHash}`);
+    console.log(`🔍 View NFT mint on basescan: https://sepolia.basescan.org/address/${account.address}`);
+    process.exit()
+  } catch (error) {
+    console.log("Error sending transaction: ", error);
+    process.exit(1)
+  }
