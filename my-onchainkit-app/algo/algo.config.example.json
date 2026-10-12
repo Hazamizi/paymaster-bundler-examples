@@ -29,10 +29,12 @@
   "quoteSize": 250,
   "minQuoteSize": 5,
   "cashReserve": 1,
+  "paperCashEur": 1000,
   "protectedBases": ["XRP", "ETH", "BTC", "SOL"],
   "cooldownSec": 900,
   "calibrateDays": 30,
   "calibrateEveryHours": 24,
   "useCalibration": true,
-  "execute": true
+  "paper": true,
+  "execute": false
 }

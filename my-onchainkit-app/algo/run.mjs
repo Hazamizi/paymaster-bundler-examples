@@ -21,6 +21,7 @@ import { sendAlert } from "./lib/alerts.mjs";
 import { appendJournal } from "./lib/journal.mjs";
 import { runStrategy } from "./strategies/index.mjs";
 import { runCalibration } from "./calibrate.mjs";
+import { applyPaperFill, defaultPaperSeed } from "./lib/paper-book.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -97,6 +98,7 @@ let state = {
   cooldowns: {},
   positions: {},
   pending: {},
+  paperCash: {},
   daily: { date: "", pnlEur: 0, trades: 0, losses: 0 },
 };
 
@@ -107,11 +109,17 @@ if (existsSync(statePath)) {
       cooldowns: loaded.cooldowns || {},
       positions: loaded.positions || {},
       pending: loaded.pending || {},
+      paperCash: loaded.paperCash || {},
       daily: loaded.daily || state.daily,
     };
   } catch {
     /* keep defaults */
   }
+}
+
+/** Explicit paper book, or execute=false (signal + simulated fills). */
+function isPaperBook() {
+  return cfg.paper === true || cfg.execute === false;
 }
 
 function saveState() {
@@ -149,6 +157,37 @@ function baseFromProduct(product) {
 function cashAvailable(balances, quote) {
   const row = balances.find((b) => b.currency === quote);
   return row?.available ?? 0;
+}
+
+/** Seed missing quote wallets for the paper book. */
+function ensurePaperCash(seedFromLive = []) {
+  if (!state.paperCash || typeof state.paperCash !== "object") {
+    state.paperCash = {};
+  }
+  const quotes = new Set(
+    (cfg.products || []).map((p) => quoteFromProduct(p)),
+  );
+  quotes.add("EUR");
+  let changed = false;
+  for (const quote of quotes) {
+    if (state.paperCash[quote] != null) continue;
+    const live = seedFromLive.find((b) => b.currency === quote)?.available;
+    state.paperCash[quote] =
+      live != null && Number.isFinite(live) && live > 0
+        ? Number(live)
+        : defaultPaperSeed(cfg, quote);
+    changed = true;
+  }
+  if (changed) saveState();
+}
+
+function paperBalances(seedFromLive = []) {
+  ensurePaperCash(seedFromLive);
+  return Object.entries(state.paperCash).map(([currency, available]) => ({
+    currency,
+    available: Number(available) || 0,
+    hold: 0,
+  }));
 }
 
 function inTradingWindow() {
@@ -193,9 +232,13 @@ function journal(entry) {
 }
 
 async function execute(signal) {
-  if (!cfg.execute) {
-    console.log("  (execute=false — signal only)");
-    return { skipped: true, dry: true, ok: true };
+  if (isPaperBook()) {
+    console.log(
+      cfg.paper
+        ? "  (paper=true — simulated fill, no live order)"
+        : "  (execute=false — paper book, no live order)",
+    );
+    return { skipped: true, dryRun: true, ok: true, paper: true };
   }
   if (!tradeSecret) throw new Error("TRADE_API_SECRET required to execute");
 
@@ -445,7 +488,26 @@ async function evaluateProduct(product, balances) {
     saveState();
   }
 
-  const { signal, meta } = runStrategy(strategyName, candles, pcfg, position);
+  let { signal, meta } = runStrategy(strategyName, candles, pcfg, position);
+
+  // Paper-only test hook: ALGO_FORCE_SIGNAL=buy|sell
+  const force = String(process.env.ALGO_FORCE_SIGNAL || "")
+    .trim()
+    .toLowerCase();
+  if (
+    isPaperBook() &&
+    (force === "buy" || force === "sell") &&
+    (!signal || force !== signal)
+  ) {
+    signal = force;
+    meta = {
+      ...meta,
+      reason: `force-${force}`,
+      orderType: "market",
+      postOnly: false,
+      sellFraction: 1,
+    };
+  }
 
   const pnl = meta.pnlPct != null ? ` pnl=${meta.pnlPct}%` : "";
   const reason = meta.reason ? ` (${meta.reason})` : "";
@@ -535,11 +597,57 @@ async function evaluateProduct(product, balances) {
     });
     console.log("  trade:", JSON.stringify(result));
 
-    const paper = Boolean(result?.skipped || result?.dryRun || !cfg.execute);
+    const paper = Boolean(
+      result?.skipped ||
+        result?.dryRun ||
+        result?.paper ||
+        isPaperBook() ||
+        !cfg.execute,
+    );
     const oid = orderIdFromResult(result);
 
     if (paper) {
       // Paper: simulate immediate fill for strategy continuity
+      ensureDaily();
+      if (isPaperBook()) {
+        const fill = applyPaperFill(state, {
+          signal,
+          product,
+          quote,
+          price,
+          quoteSize: quoteSize ?? cfg.quoteSize ?? 25,
+          baseSize,
+          position,
+          frac,
+          markScaledOut: Boolean(meta.markScaledOut),
+          rsi: meta.rsi,
+          reason: meta.reason,
+        });
+        if (!fill.ok) {
+          console.log(`  skip paper ${signal}: ${fill.reason}`);
+          delete state.cooldowns[key];
+          saveState();
+          return;
+        }
+        saveState();
+        journal({
+          event: fill.event,
+          product,
+          price,
+          qty: fill.qty,
+          spent: fill.spent,
+          proceeds: fill.proceeds,
+          entry: fill.entry,
+          pnlPct: fill.pnlPct,
+          pnlEur: fill.pnlEur,
+          rsi: meta.rsi,
+          reason: meta.reason,
+          paperCash: fill.paperCash,
+        });
+        return;
+      }
+
+      // Dry-run via trade API (execute=true, TRADE_DRY_RUN): track lots only
       if (signal === "buy") {
         const spent = Number(quoteSize ?? cfg.quoteSize ?? 25);
         const qty = spent / Number(price);
@@ -551,19 +659,32 @@ async function evaluateProduct(product, balances) {
           scaledOut: false,
           openedAt: new Date().toISOString(),
           entryRsi: meta.rsi,
+          paper: true,
         };
+        state.daily.trades += 1;
         saveState();
       } else if (signal === "sell") {
+        const soldQty = Number(baseSize);
+        const entry = position?.entry ?? price;
+        const posQty = Number(position?.qty || soldQty);
+        const costBasis =
+          (Number(position?.quoteSpent) || entry * posQty) * (soldQty / posQty);
+        const pnlEur = soldQty * Number(price) - costBasis;
         if (meta.markScaledOut && frac < 1 && position) {
           state.positions[product] = {
             ...position,
             qty: Number(position.qty) * (1 - frac),
+            quoteSpent: Number(position.quoteSpent || 0) * (1 - frac),
             scaledOut: true,
             peakPrice: Math.max(position.peakPrice || position.entry, price),
+            paper: true,
           };
         } else {
           delete state.positions[product];
         }
+        state.daily.trades += 1;
+        state.daily.pnlEur += pnlEur;
+        if (pnlEur < 0) state.daily.losses += 1;
         saveState();
       }
       journal({
@@ -695,19 +816,34 @@ async function tick() {
   );
 
   let balances = [];
+  let liveBalances = [];
   try {
-    balances = await fetchBalances();
-    const cashRows = balances.filter(
+    liveBalances = await fetchBalances();
+    balances = liveBalances;
+    const cashRows = liveBalances.filter(
       (b) => CASH.has(b.currency) && b.available > 0,
     );
     console.log(
-      "  cash:",
+      "  live cash:",
       cashRows.map((b) => `${b.currency}=${b.available.toFixed(2)}`).join(" ") ||
         "(none)",
     );
   } catch (err) {
     console.error("  balance fetch failed:", err.message);
-    await alert(`❌ Balance fetch failed: ${err.message}`);
+    if (!isPaperBook()) {
+      await alert(`❌ Balance fetch failed: ${err.message}`);
+    }
+  }
+
+  if (isPaperBook()) {
+    balances = paperBalances(liveBalances);
+    console.log(
+      "  paper cash:",
+      balances
+        .filter((b) => CASH.has(b.currency))
+        .map((b) => `${b.currency}=${b.available.toFixed(2)}`)
+        .join(" ") || "(none)",
+    );
   }
 
   for (const product of cfg.products || []) {
@@ -721,8 +857,12 @@ async function tick() {
 }
 
 const pollMs = (cfg.pollSec || 60) * 1000;
+const once = process.argv.includes("--once");
 console.log(
   `Algo started → ${cfg.strategy} on ${(cfg.products || []).join(", ")} every ${cfg.pollSec || 60}s`,
+);
+console.log(
+  `Mode: ${isPaperBook() ? "PAPER (simulated fills, virtual cash)" : "LIVE (execute=true; still gated by TRADE_DRY_RUN)"}`,
 );
 console.log(
   `Upgrades: fills+TTL · trail · scale-out · spread · time window · daily caps · alerts · journal · 30d calibrate`,
@@ -734,7 +874,13 @@ console.log(`Trade API: ${tradeUrl}`);
 console.log(`Journal: ${journalPath}`);
 
 calibration = loadCalibrationFile();
-await ensureCalibration("startup");
+if (cfg.useCalibration !== false) {
+  await ensureCalibration("startup");
+}
 
 await tick();
+if (once) {
+  console.log("(--once) exiting after single tick");
+  process.exit(0);
+}
 setInterval(tick, pollMs);

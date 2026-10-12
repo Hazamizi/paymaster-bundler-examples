@@ -4,7 +4,7 @@ config({ path: ".env.local" });
 async function main() {
   const { executeTradeSignal } = await import("../lib/tradeAgent.ts");
   const r = await executeTradeSignal({
-    ticker: "ETH-USDC",
+    ticker: "ETH-EUR",
     action: "buy",
     quoteSize: "2",
     source: "smoke",
