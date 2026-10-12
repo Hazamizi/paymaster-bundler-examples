@@ -147,6 +147,55 @@ try {
       dailyTrades: trades,
     }),
   );
+
+  // --- forced paper sell: close lot, credit cash, record PnL ---
+  const entry = Number(eth.entry);
+  const qty = Number(eth.qty);
+  const quoteSpent = Number(eth.quoteSpent);
+  const sellRun = spawnSync(process.execPath, ["algo/run.mjs", "--once"], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, ALGO_FORCE_SIGNAL: "sell" },
+  });
+  console.log(sellRun.stdout || "");
+  if (sellRun.status !== 0) {
+    console.error(sellRun.stderr || "");
+    throw new Error(`algo --once (sell) exited ${sellRun.status}`);
+  }
+
+  const after = JSON.parse(readFileSync(statePath, "utf8"));
+  if (after.positions?.["ETH-EUR"]) {
+    throw new Error("forced paper sell left ETH-EUR position open");
+  }
+  const cashAfter = Number(after.paperCash?.EUR);
+  const tradesAfter = Number(after.daily?.trades || 0);
+  const pnlAfter = Number(after.daily?.pnlEur || 0);
+  if (tradesAfter < 2) {
+    throw new Error(`expected ≥2 daily trades after sell, got ${tradesAfter}`);
+  }
+  // Proceeds ≈ qty * last ticker; allow market move between ticks.
+  if (!(cashAfter > cash)) {
+    throw new Error(
+      `sell should credit cash (before=${cash}, after=${cashAfter})`,
+    );
+  }
+  // Rough identity: cash ≈ seed - spent + proceeds; PnL ≈ cash - seed
+  const seed = 100;
+  const impliedPnl = cashAfter - seed;
+  if (Math.abs(pnlAfter - impliedPnl) > 1) {
+    throw new Error(
+      `daily.pnlEur ${pnlAfter} vs cashΔ ${impliedPnl} (entry=${entry} qty=${qty} spent=${quoteSpent})`,
+    );
+  }
+  console.log(
+    "OK: forced paper sell",
+    JSON.stringify({
+      paperCashEur: cashAfter,
+      dailyTrades: tradesAfter,
+      dailyPnlEur: pnlAfter,
+      cashDelta: impliedPnl,
+    }),
+  );
 } finally {
   restore();
 }

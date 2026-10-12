@@ -168,12 +168,19 @@ function ensurePaperCash(seedFromLive = []) {
     (cfg.products || []).map((p) => quoteFromProduct(p)),
   );
   quotes.add("EUR");
+  // Prefer configured paper seed (paperCashEur / paperStartingCash). Only mirror
+  // live when paper mode is implicit and no paper cash knobs are set.
+  const preferConfigured =
+    cfg.paper === true ||
+    cfg.paperCashEur != null ||
+    cfg.paperCashUsd != null ||
+    cfg.paperStartingCash != null;
   let changed = false;
   for (const quote of quotes) {
     if (state.paperCash[quote] != null) continue;
     const live = seedFromLive.find((b) => b.currency === quote)?.available;
     state.paperCash[quote] =
-      live != null && Number.isFinite(live) && live > 0
+      !preferConfigured && live != null && Number.isFinite(live) && live > 0
         ? Number(live)
         : defaultPaperSeed(cfg, quote);
     changed = true;
@@ -573,7 +580,9 @@ async function evaluateProduct(product, balances) {
     let baseSize;
     const frac = meta.sellFraction ?? 1;
     if (signal === "sell") {
-      baseSize = Number((Number(position.qty) * frac * 0.995).toFixed(8));
+      // Live: small haircut avoids overselling dust; paper: sell exact lot size.
+      const lotFrac = isPaperBook() ? 1 : 0.995;
+      baseSize = Number((Number(position.qty) * frac * lotFrac).toFixed(8));
       if (!(baseSize > 0)) {
         console.log("  skip sell: qty too small");
         return;

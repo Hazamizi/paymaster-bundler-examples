@@ -108,7 +108,7 @@ export function applyPaperFill(state, {
     }
 
     daily.trades += 1;
-    daily.pnlEur += pnlEur;
+    daily.pnlEur = Number((daily.pnlEur + pnlEur).toFixed(4));
     if (pnlEur < 0) daily.losses += 1;
 
     return {
