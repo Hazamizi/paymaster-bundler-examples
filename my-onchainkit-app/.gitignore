@@ -45,6 +45,7 @@ next-env.d.ts
 algo/trades.journal.jsonl
 
 algo/signals.calibrated.json
+algo/paper-7day-report.json
 
 algo/instagram.recipient.json
 algo/instagram.webhook.jsonl
