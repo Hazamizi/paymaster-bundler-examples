@@ -48,6 +48,13 @@ algo/signals.calibrated.json
 algo/paper-7day-report.json
 algo/paper-strategies-report.json
 algo/paper-strategies.config.json
+algo/paper-week-four.lock
+algo/paper-week-four.*.state.json
+algo/paper-week-four.*.state.json.*.tmp
+algo/paper-week-four.*.journal.jsonl
+algo/paper-week-four.*.journal.jsonl.*.tmp
+algo/paper-week-four-report.json
+algo/paper-week-four-report.json.*.tmp
 
 algo/instagram.recipient.json
 algo/instagram.webhook.jsonl

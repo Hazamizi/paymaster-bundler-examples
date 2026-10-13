@@ -9,10 +9,13 @@
  * Each strategy walks the same hourly candles with the same seed
  * (€500), stake (€100), and max open positions (2). Fills go through
  * applyPaperFill. The JSON report is gitignored.
+ *
+ * This file is the one-shot historical walk. The fixed calendar week
+ * that resumes is algo/paper-week-four.mjs.
  */
 import { readFileSync, existsSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
-import { fileURLToPath } from "url";
+import { dirname, join, resolve } from "path";
+import { fileURLToPath, pathToFileURL } from "url";
 import { applyPaperFill } from "./lib/paper-book.mjs";
 import { sma } from "./lib/indicators.mjs";
 import { FOUR_PAPER_STRATEGIES } from "./strategies/four-paper.mjs";
@@ -35,7 +38,7 @@ function argNum(flag, fallback) {
   return fallback;
 }
 
-function loadConfig() {
+export function loadConfig() {
   const localPath = join(__dirname, "paper-strategies.config.json");
   const examplePath = join(__dirname, "paper-strategies.config.example.json");
   const configPath = existsSync(localPath) ? localPath : examplePath;
@@ -77,10 +80,10 @@ export function selectProducts(products) {
   return { products: kept, dropped };
 }
 
-async function fetchHourly(product, hours) {
+export async function fetchHourlyRange(product, startSec, endSec) {
   const out = [];
-  const end = Math.floor(Date.now() / 1000);
-  const start = end - hours * 3600;
+  const start = Math.floor(startSec);
+  const end = Math.floor(endSec);
   let cursor = end;
   for (let page = 0; page < 20 && cursor > start; page++) {
     const pageStart = Math.max(start, cursor - 280 * 3600);
@@ -152,6 +155,12 @@ async function fetchHourly(product, hours) {
   return [...map.values()].sort((a, b) => a.time - b.time);
 }
 
+async function fetchHourly(product, hours) {
+  const end = Math.floor(Date.now() / 1000);
+  const start = end - hours * 3600;
+  return fetchHourlyRange(product, start, end);
+}
+
 function openCount(positions) {
   return Object.values(positions).filter((p) => p && Number(p.qty) > 0).length;
 }
@@ -193,21 +202,34 @@ function regimeRow(product, candles, simStart) {
   };
 }
 
-function walkStrategy({ name, scfg, products, series, timeline, book }) {
-  const state = {
+export function emptyBookState(seed) {
+  return {
     positions: {},
-    paperCash: { EUR: book.seed },
+    paperCash: { EUR: seed },
     daily: { date: "", pnlEur: 0, trades: 0, losses: 0 },
   };
-  const journal = [];
-  const byProduct = Object.fromEntries(
+}
+
+export function emptyByProduct(products) {
+  return Object.fromEntries(
     products.map((p) => [p, { buys: 0, sells: 0, pnlEur: 0, reasons: {} }]),
   );
-  const lastPrices = {};
+}
 
-  for (const t of timeline) {
-    const sells = [];
-    const buys = [];
+export function processTimestamp({
+  name,
+  scfg,
+  products,
+  series,
+  t,
+  state,
+  book,
+  journal,
+  byProduct,
+  lastPrices,
+}) {
+  const sells = [];
+  const buys = [];
 
     for (const product of products) {
       const candles = series[product];
@@ -313,8 +335,9 @@ function walkStrategy({ name, scfg, products, series, timeline, book }) {
         reason,
       });
     }
-  }
+}
 
+export function summarizeBook({ state, journal, lastPrices, book }) {
   const equity = markToMarket(state, lastPrices);
   const realized = journal
     .filter((j) => j.pnlEur != null)
@@ -329,25 +352,49 @@ function walkStrategy({ name, scfg, products, series, timeline, book }) {
   const feeEst = ((buyNotional + sellNotional) * (book.feePct / 100)) / 2;
 
   return {
+    paperCashEur: Number((Number(state.paperCash.EUR) || 0).toFixed(2)),
+    equityEur: equity,
+    realizedPnlEur: Number(realized.toFixed(4)),
+    feeEstimateEur: Number(feeEst.toFixed(2)),
+    buys: journal.filter((j) => j.event === "paper_buy").length,
+    sells: closed.length,
+    wins,
+    losses,
+    openPositions: openCount(state.positions),
+  };
+}
+
+function walkStrategy({ name, scfg, products, series, timeline, book }) {
+  const state = emptyBookState(book.seed);
+  const journal = [];
+  const byProduct = emptyByProduct(products);
+  const lastPrices = {};
+
+  for (const t of timeline) {
+    processTimestamp({
+      name,
+      scfg,
+      products,
+      series,
+      t,
+      state,
+      book,
+      journal,
+      byProduct,
+      lastPrices,
+    });
+  }
+
+  return {
     strategy: name,
-    summary: {
-      paperCashEur: Number((Number(state.paperCash.EUR) || 0).toFixed(2)),
-      equityEur: equity,
-      realizedPnlEur: Number(realized.toFixed(4)),
-      feeEstimateEur: Number(feeEst.toFixed(2)),
-      buys: journal.filter((j) => j.event === "paper_buy").length,
-      sells: closed.length,
-      wins,
-      losses,
-      openPositions: openCount(state.positions),
-    },
+    summary: summarizeBook({ state, journal, lastPrices, book }),
     byProduct,
     openPositions: state.positions,
     journal,
   };
 }
 
-function printTable(rows) {
+export function printTable(rows) {
   const header = [
     "strategy".padEnd(16),
     "equity".padStart(10),
@@ -377,6 +424,13 @@ function printTable(rows) {
   }
 }
 
+function isDirectRun() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return import.meta.url === pathToFileURL(resolve(entry)).href;
+}
+
+async function main() {
 const days = Math.max(1, argNum("--days", 7));
 const warmupHours = Math.max(520, argNum("--warmup", 600));
 const { cfg, configPath, usedExample } = loadConfig();
@@ -513,3 +567,8 @@ const report = {
 };
 writeFileSync(outPath, JSON.stringify(report, null, 2));
 console.log(`\nWrote ${outPath}`);
+}
+
+if (isDirectRun()) {
+  await main();
+}
