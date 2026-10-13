@@ -353,6 +353,127 @@ export function pctScalp(closes, cfg, position = null) {
   };
 }
 
+/**
+ * Exit levels for paper-week-v2.
+ * Take-profit cannot fall below 1.5% (0.5% of a €100 stake is the €0.50 scalp).
+ * Stop cannot widen past 2% (the old book used ~3% and lost multiple euros per stop).
+ */
+export function paperWeekV2Levels(cfg = {}) {
+  const tpReq = Number(cfg.takeProfitPct);
+  const slReq = Number(cfg.stopLossPct);
+  const requestedTp = Number.isFinite(tpReq) ? tpReq : 1.5;
+  const requestedSl = Number.isFinite(slReq) && slReq > 0 ? slReq : 1.5;
+  return {
+    takeProfitPct: Math.max(1.5, requestedTp),
+    stopLossPct: Math.min(2, requestedSl),
+    takeProfitRaised: requestedTp < 1.5,
+    stopCapped: requestedSl > 2,
+  };
+}
+
+/**
+ * paper-week-v2: RSI dip entry, symmetric ~1.5% take-profit and stop.
+ * Full exit only — no partial scale-out and no eur_0.50_to_1 style target.
+ * Defaults live here and do not change pct-scalp.
+ *
+ * Entry needs enough closes for RSI and the short MA, then RSI at or below
+ * the buy threshold while price is still within 3% of that MA (dip spirit
+ * of pct-scalp, without that strategy's 3% stop or 3.5% scale-out).
+ */
+export function paperWeekV2(closes, cfg = {}, position = null) {
+  const rsiPeriod = cfg.rsiPeriod ?? 14;
+  const maPeriod = cfg.maFast ?? 20;
+  const minBars = Math.max(rsiPeriod + 1, maPeriod, Number(cfg.minBars) || 0);
+  const price = closes.length ? closes[closes.length - 1] : null;
+  const value = closes.length >= minBars ? rsi(closes, rsiPeriod) : null;
+  const maFast = closes.length >= maPeriod ? sma(closes, maPeriod) : null;
+  const levels = paperWeekV2Levels(cfg);
+  const { takeProfitPct, stopLossPct } = levels;
+  const rsiBuyBelow = cfg.rsiBuyBelow ?? 32;
+
+  const meta = {
+    strategy: "paper-week-v2",
+    price: price != null ? Number(price.toFixed(6)) : null,
+    rsi: value != null ? Number(value.toFixed(2)) : null,
+    maFast: maFast != null ? Number(maFast.toFixed(6)) : null,
+    takeProfitPct,
+    stopLossPct,
+    takeProfitRaised: levels.takeProfitRaised,
+    stopCapped: levels.stopCapped,
+    feeBufferPct: cfg.feeBufferPct ?? null,
+    inPosition: Boolean(position?.entry),
+    bars: closes.length,
+    minBars,
+  };
+
+  if (price == null || value == null || closes.length < minBars) {
+    return {
+      signal: null,
+      meta: { ...meta, ready: false, reason: "not enough candle history" },
+    };
+  }
+
+  if (position?.entry) {
+    const entry = Number(position.entry);
+    const pnlPct = ((price - entry) / entry) * 100;
+    meta.entry = entry;
+    meta.pnlPct = Number(pnlPct.toFixed(3));
+    meta.targetPrice = Number((entry * (1 + takeProfitPct / 100)).toFixed(6));
+    meta.stopPrice = Number((entry * (1 - stopLossPct / 100)).toFixed(6));
+
+    if (pnlPct <= -stopLossPct + 1e-6) {
+      return {
+        signal: "sell",
+        meta: {
+          ...meta,
+          ready: true,
+          reason: `stop-loss −${stopLossPct}%`,
+          sellFraction: 1,
+        },
+      };
+    }
+
+    if (pnlPct >= takeProfitPct - 1e-6) {
+      return {
+        signal: "sell",
+        meta: {
+          ...meta,
+          ready: true,
+          reason: `take-profit ${takeProfitPct}%`,
+          sellFraction: 1,
+        },
+      };
+    }
+
+    return {
+      signal: null,
+      meta: {
+        ...meta,
+        ready: true,
+        reason: `holding for +${takeProfitPct}%`,
+      },
+    };
+  }
+
+  const dipOk = value <= rsiBuyBelow;
+  const trendOk = maFast == null || price >= maFast * 0.97;
+  const longSetup = dipOk && trendOk;
+
+  return {
+    signal: longSetup ? "buy" : null,
+    meta: {
+      ...meta,
+      ready: true,
+      reason: longSetup ? `entry RSI≤${rsiBuyBelow}` : "wait for dip",
+      checks: {
+        rsiDip: dipOk,
+        nearTrend: trendOk,
+        enoughHistory: true,
+      },
+    },
+  };
+}
+
 export function runStrategy(name, data, cfg, position = null) {
   // data may be closes[] (legacy) or candles[] (full confluence)
   const isCandles =
@@ -376,6 +497,8 @@ export function runStrategy(name, data, cfg, position = null) {
         };
       }
       return fullConfluence(data, cfg);
+    case "paper-week-v2":
+      return paperWeekV2(closes, cfg, position);
     case "pct-scalp":
     default:
       return pctScalp(closes, cfg, position);

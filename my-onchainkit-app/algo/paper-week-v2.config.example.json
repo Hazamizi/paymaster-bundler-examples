@@ -1,0 +1,21 @@
+{
+  "strategy": "paper-week-v2",
+  "products": ["ADA-EUR", "LINK-EUR", "AVAX-EUR", "BTC-EUR", "LTC-EUR", "XRP-EUR"],
+  "paper": true,
+  "execute": false,
+  "granularity": "ONE_HOUR",
+  "candleLookback": 120,
+  "rsiPeriod": 14,
+  "rsiBuyBelow": 32,
+  "maFast": 20,
+  "feeBufferPct": 1.0,
+  "takeProfitPct": 1.5,
+  "stopLossPct": 1.5,
+  "maxOpenPositions": 2,
+  "maxDailyLossEur": 15,
+  "maxDailyTrades": 8,
+  "quoteSize": 100,
+  "minQuoteSize": 5,
+  "cashReserve": 1,
+  "paperCashEur": 500
+}
