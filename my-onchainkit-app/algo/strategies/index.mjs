@@ -6,6 +6,7 @@ import {
   volumeSurge,
   supportResistance,
 } from "../lib/indicators.mjs";
+import { runFourPaperStrategy } from "./four-paper.mjs";
 
 export function rsiMeanReversion(closes, cfg) {
   const value = rsi(closes, cfg.rsiPeriod ?? 14);
@@ -376,6 +377,14 @@ export function runStrategy(name, data, cfg, position = null) {
         };
       }
       return fullConfluence(data, cfg);
+    case "trend-pullback":
+    case "sma-dip":
+    case "range-bounce":
+    case "quiet-leader": {
+      const picked = runFourPaperStrategy(name, isCandles ? data : closes, cfg, position);
+      if (picked) return picked;
+      return pctScalp(closes, cfg, position);
+    }
     case "pct-scalp":
     default:
       return pctScalp(closes, cfg, position);
