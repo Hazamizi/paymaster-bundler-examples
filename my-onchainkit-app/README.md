@@ -41,6 +41,7 @@ cp algo/algo.config.example.json algo/algo.config.json
 npm run smoke:paper      # unit + forced buy/sell + daily caps
 npm run algo:once        # one strategy tick
 npm run paper:7day       # walk last 7 days of hourly candles
+npm run paper:7day -- --days 1 --products ETH-EUR
 npm run algo             # poll forever in paper mode
 ```
 

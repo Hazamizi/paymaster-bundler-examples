@@ -3,6 +3,7 @@
  *
  *   node algo/paper-7day.mjs
  *   node algo/paper-7day.mjs --days 7
+ *   node algo/paper-7day.mjs --days 1 --products ETH-EUR
  *   npm run paper:7day
  *
  * Uses public Coinbase market candles. No live orders.
@@ -24,8 +25,18 @@ function argNum(flag, fallback) {
   return fallback;
 }
 
+function argList(flag) {
+  const i = process.argv.indexOf(flag);
+  if (i < 0 || !process.argv[i + 1]) return null;
+  return process.argv[i + 1]
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+}
+
 const days = Math.max(1, argNum("--days", 7));
 const warmupHours = Math.max(80, argNum("--warmup", 120));
+const productOverride = argList("--products");
 
 if (!existsSync(configPath) && existsSync(examplePath)) {
   copyFileSync(examplePath, configPath);
@@ -37,7 +48,9 @@ if (!existsSync(configPath)) {
 }
 
 const cfg = JSON.parse(readFileSync(configPath, "utf8"));
-const products = cfg.products || ["ETH-EUR"];
+const products = productOverride?.length
+  ? productOverride
+  : cfg.products || ["ETH-EUR"];
 const lookback = Number(cfg.candleLookback ?? 120);
 const feePct = Number(cfg.feeBufferPct ?? 1.0);
 const quoteSizeWant = Number(cfg.quoteSize ?? 25);
