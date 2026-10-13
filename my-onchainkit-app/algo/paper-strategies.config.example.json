@@ -1,0 +1,52 @@
+{
+  "paper": true,
+  "execute": false,
+  "products": ["ADA-EUR", "LINK-EUR", "AVAX-EUR", "BTC-EUR", "LTC-EUR", "XRP-EUR"],
+  "granularity": "ONE_HOUR",
+  "paperCashEur": 500,
+  "quoteSize": 100,
+  "maxOpenPositions": 2,
+  "minQuoteSize": 5,
+  "cashReserve": 1,
+  "feeBufferPct": 1.0,
+  "notes": "Paper only. Universe is the EUR pairs that were green in the prior week (ADA, LINK, AVAX, BTC, LTC, XRP). On 2026-10-13 ETH and SOL were in the same 7-day pullback and are excluded. Each strategy has its own buy and sell. Seed €500, stake €100, max 2 open, same window for all four.",
+  "strategies": [
+    {
+      "name": "trend-pullback",
+      "smaSlow": 480,
+      "smaFast": 48,
+      "slopeBars": 24,
+      "maxDiscountPct": 4,
+      "stopLossPct": 5,
+      "trailArmPct": 8,
+      "trailGivebackPct": 2.5
+    },
+    {
+      "name": "sma-dip",
+      "smaPeriod": 480,
+      "slopeBars": 48,
+      "entryDiscountPct": 5,
+      "exitDiscountPct": 1.5,
+      "failDiscountPct": 9
+    },
+    {
+      "name": "range-bounce",
+      "rangeBars": 72,
+      "maxPos": 0.25,
+      "minWidthPct": 6,
+      "maxWidthPct": 30
+    },
+    {
+      "name": "quiet-leader",
+      "rangeBars": 72,
+      "maxWidthPct": 5.5,
+      "exitWidthPct": 6.5,
+      "smaFast": 48,
+      "smaSlow": 480,
+      "slopeBars": 6,
+      "smaBreakPct": 1,
+      "takeProfitPct": 2.5,
+      "stopLossPct": 2
+    }
+  ]
+}

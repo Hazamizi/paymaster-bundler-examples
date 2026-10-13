@@ -14,6 +14,7 @@
     "trade:accounts": "node agent/cli.mjs balances",
     "smoke:paper": "node agent/smoke-paper.mjs",
     "paper:7day": "node algo/paper-7day.mjs",
+    "paper:strategies": "node algo/paper-strategies.mjs",
     "algo": "node algo/run.mjs",
     "algo:once": "node algo/run.mjs --once",
     "algo:alerts": "node algo/setup-alerts.mjs",
