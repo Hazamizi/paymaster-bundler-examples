@@ -7,7 +7,11 @@ import { writeFileSync, unlinkSync, existsSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { spawnSync } from "child_process";
-import { applyPaperFill } from "../algo/lib/paper-book.mjs";
+import {
+  applyPaperFill,
+  dailyPnl,
+  defaultPaperSeed,
+} from "../algo/lib/paper-book.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -30,6 +34,17 @@ function restore() {
   else if (existsSync(statePath)) unlinkSync(statePath);
   if (hadJournal) writeFileSync(journalPath, prevJournal);
   else if (existsSync(journalPath)) unlinkSync(journalPath);
+}
+
+// --- unit: defaultPaperSeed honors config quote wallets ---
+{
+  if (defaultPaperSeed({ paperCashEur: 500 }, "EUR") !== 500) {
+    throw new Error("paperCashEur seed failed");
+  }
+  if (defaultPaperSeed({ paperCashUsd: 200, paperCashEur: 500 }, "USD") !== 200) {
+    throw new Error("paperCashUsd seed failed");
+  }
+  console.log("OK: defaultPaperSeed");
 }
 
 // --- unit: buy then sell restores cash and records PnL ---
@@ -74,6 +89,110 @@ function restore() {
   });
 }
 
+// --- unit: partial scale-out keeps half the lot and credits proceeds ---
+{
+  const state = {
+    positions: {},
+    paperCash: { EUR: 100 },
+    daily: { date: "2099-01-01", pnlEur: 0, trades: 0, losses: 0 },
+  };
+  const buy = applyPaperFill(state, {
+    signal: "buy",
+    product: "ETH-EUR",
+    quote: "EUR",
+    price: 1000,
+    quoteSize: 40,
+  });
+  if (!buy.ok) throw new Error(`scale-out buy failed: ${JSON.stringify(buy)}`);
+  const pos = state.positions["ETH-EUR"];
+  const halfQty = pos.qty / 2;
+  const scale = applyPaperFill(state, {
+    signal: "sell",
+    product: "ETH-EUR",
+    quote: "EUR",
+    price: 1100,
+    baseSize: halfQty,
+    position: pos,
+    frac: 0.5,
+    markScaledOut: true,
+  });
+  if (!scale.ok) throw new Error(`scale-out sell failed: ${JSON.stringify(scale)}`);
+  const remain = state.positions["ETH-EUR"];
+  if (!remain?.scaledOut || Math.abs(remain.qty - halfQty) > 1e-9) {
+    throw new Error(`expected half lot remaining, got ${JSON.stringify(remain)}`);
+  }
+  // 60 cash + 22 proceeds (0.02 ETH @ 1100) = 82
+  if (Math.abs(state.paperCash.EUR - 82) > 0.02) {
+    throw new Error(`scale-out cash expected ~82, got ${state.paperCash.EUR}`);
+  }
+  console.log("OK: paper-book scale-out", {
+    cash: state.paperCash.EUR,
+    remainQty: remain.qty,
+    pnlEur: state.daily.pnlEur,
+  });
+}
+
+// --- unit: refuse buy when paper cash is insufficient ---
+{
+  const state = {
+    positions: {},
+    paperCash: { EUR: 10 },
+    daily: { date: "2099-01-01", pnlEur: 0, trades: 0, losses: 0 },
+  };
+  const buy = applyPaperFill(state, {
+    signal: "buy",
+    product: "ETH-EUR",
+    quote: "EUR",
+    price: 2000,
+    quoteSize: 50,
+  });
+  if (buy.ok || !String(buy.reason || "").includes("insufficient")) {
+    throw new Error(`expected insufficient paper EUR: ${JSON.stringify(buy)}`);
+  }
+  console.log("OK: paper-book rejects oversize buy");
+}
+
+// --- unit: updateCash:false tracks lots/PnL without touching paperCash ---
+{
+  const state = {
+    positions: {},
+    paperCash: { EUR: 100 },
+    daily: { date: "2099-01-01", pnlEur: 0, trades: 0, losses: 0 },
+  };
+  const buy = applyPaperFill(state, {
+    signal: "buy",
+    product: "ETH-EUR",
+    quote: "EUR",
+    price: 2000,
+    quoteSize: 50,
+    updateCash: false,
+  });
+  if (!buy.ok || state.paperCash.EUR !== 100) {
+    throw new Error(`dry-run buy should not debit cash: ${JSON.stringify(buy)}`);
+  }
+  const pos = state.positions["ETH-EUR"];
+  const sell = applyPaperFill(state, {
+    signal: "sell",
+    product: "ETH-EUR",
+    quote: "EUR",
+    price: 2200,
+    baseSize: pos.qty,
+    position: pos,
+    frac: 1,
+    updateCash: false,
+  });
+  if (!sell.ok || state.paperCash.EUR !== 100) {
+    throw new Error(`dry-run sell should not credit cash: ${JSON.stringify(sell)}`);
+  }
+  if (Math.abs(dailyPnl(state.daily) - 5) > 0.02 || state.daily.pnl !== state.daily.pnlEur) {
+    throw new Error(`dry-run pnl expected 5 with pnl aliases: ${JSON.stringify(state.daily)}`);
+  }
+  console.log("OK: dry-run fill tracks PnL without cash", {
+    cash: state.paperCash.EUR,
+    pnl: dailyPnl(state.daily),
+  });
+}
+
 const paperCfg = {
   strategy: "pct-scalp",
   products: ["ETH-EUR"],
@@ -108,6 +227,86 @@ try {
   writeFileSync(configPath, JSON.stringify(paperCfg, null, 2));
   if (existsSync(statePath)) unlinkSync(statePath);
   if (existsSync(journalPath)) unlinkSync(journalPath);
+
+  // --- integration: daily loss cap blocks even forced paper buys ---
+  {
+    const today = new Date().toISOString().slice(0, 10);
+    const capCfg = { ...paperCfg, maxDailyLossEur: 15 };
+    writeFileSync(configPath, JSON.stringify(capCfg, null, 2));
+    writeFileSync(
+      statePath,
+      JSON.stringify(
+        {
+          positions: {},
+          paperCash: { EUR: 100 },
+          daily: { date: today, pnlEur: -20, trades: 0, losses: 1 },
+          cooldowns: {},
+          pending: {},
+        },
+        null,
+        2,
+      ),
+    );
+    const capRun = spawnSync(process.execPath, ["algo/run.mjs", "--once"], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, ALGO_FORCE_SIGNAL: "buy" },
+    });
+    const out = `${capRun.stdout || ""}${capRun.stderr || ""}`;
+    if (capRun.status !== 0) {
+      throw new Error(`daily cap smoke exited ${capRun.status}: ${out}`);
+    }
+    if (!out.includes("daily loss cap")) {
+      throw new Error(`expected daily loss cap skip in output: ${out}`);
+    }
+    const capped = JSON.parse(readFileSync(statePath, "utf8"));
+    if (capped.positions?.["ETH-EUR"]) {
+      throw new Error("daily loss cap should not open a position");
+    }
+    console.log("OK: daily loss cap blocks forced paper buy");
+    writeFileSync(configPath, JSON.stringify(paperCfg, null, 2));
+    if (existsSync(statePath)) unlinkSync(statePath);
+  }
+
+  // --- integration: daily trade cap blocks forced paper buys ---
+  {
+    const today = new Date().toISOString().slice(0, 10);
+    const capCfg = { ...paperCfg, maxDailyTrades: 3, maxDailyLossEur: 9999 };
+    writeFileSync(configPath, JSON.stringify(capCfg, null, 2));
+    writeFileSync(
+      statePath,
+      JSON.stringify(
+        {
+          positions: {},
+          paperCash: { EUR: 100 },
+          daily: { date: today, pnlEur: 0, trades: 3, losses: 0 },
+          cooldowns: {},
+          pending: {},
+        },
+        null,
+        2,
+      ),
+    );
+    const capRun = spawnSync(process.execPath, ["algo/run.mjs", "--once"], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, ALGO_FORCE_SIGNAL: "buy" },
+    });
+    const out = `${capRun.stdout || ""}${capRun.stderr || ""}`;
+    if (capRun.status !== 0) {
+      throw new Error(`daily trade cap smoke exited ${capRun.status}: ${out}`);
+    }
+    if (!out.includes("daily trade cap")) {
+      throw new Error(`expected daily trade cap skip in output: ${out}`);
+    }
+    const capped = JSON.parse(readFileSync(statePath, "utf8"));
+    if (capped.positions?.["ETH-EUR"]) {
+      throw new Error("daily trade cap should not open a position");
+    }
+    console.log("OK: daily trade cap blocks forced paper buy");
+    writeFileSync(configPath, JSON.stringify(paperCfg, null, 2));
+    if (existsSync(statePath)) unlinkSync(statePath);
+  }
 
   const run = spawnSync(process.execPath, ["algo/run.mjs", "--once"], {
     cwd: root,

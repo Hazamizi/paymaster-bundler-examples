@@ -3,6 +3,7 @@
  *
  *   node algo/paper-7day.mjs
  *   node algo/paper-7day.mjs --days 7
+ *   node algo/paper-7day.mjs --days 1 --products ETH-EUR
  *   npm run paper:7day
  *
  * Uses public Coinbase market candles. No live orders.
@@ -10,7 +11,11 @@
 import { readFileSync, existsSync, writeFileSync, copyFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { applyPaperFill, defaultPaperSeed } from "./lib/paper-book.mjs";
+import {
+  applyPaperFill,
+  dailyPnl,
+  defaultPaperSeed,
+} from "./lib/paper-book.mjs";
 import { runStrategy } from "./strategies/index.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -24,8 +29,18 @@ function argNum(flag, fallback) {
   return fallback;
 }
 
+function argList(flag) {
+  const i = process.argv.indexOf(flag);
+  if (i < 0 || !process.argv[i + 1]) return null;
+  return process.argv[i + 1]
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+}
+
 const days = Math.max(1, argNum("--days", 7));
 const warmupHours = Math.max(80, argNum("--warmup", 120));
+const productOverride = argList("--products");
 
 if (!existsSync(configPath) && existsSync(examplePath)) {
   copyFileSync(examplePath, configPath);
@@ -37,7 +52,9 @@ if (!existsSync(configPath)) {
 }
 
 const cfg = JSON.parse(readFileSync(configPath, "utf8"));
-const products = cfg.products || ["ETH-EUR"];
+const products = productOverride?.length
+  ? productOverride
+  : cfg.products || ["ETH-EUR"];
 const lookback = Number(cfg.candleLookback ?? 120);
 const feePct = Number(cfg.feeBufferPct ?? 1.0);
 const quoteSizeWant = Number(cfg.quoteSize ?? 25);
@@ -90,13 +107,13 @@ function dayKey(unixSec) {
 function ensureDaily(state, unixSec) {
   const d = dayKey(unixSec);
   if (state.daily.date !== d) {
-    state.daily = { date: d, pnlEur: 0, trades: 0, losses: 0 };
+    state.daily = { date: d, pnl: 0, pnlEur: 0, trades: 0, losses: 0 };
   }
 }
 
 function dailyBlocked(state) {
-  if (state.daily.pnlEur <= -maxDailyLoss) {
-    return `daily loss cap €${maxDailyLoss}`;
+  if (dailyPnl(state.daily) <= -maxDailyLoss) {
+    return `daily loss cap ${maxDailyLoss}`;
   }
   if (state.daily.trades >= maxDailyTrades) {
     return `daily trade cap ${maxDailyTrades}`;
@@ -116,7 +133,7 @@ function markToMarket(state, lastPrices) {
 const state = {
   positions: {},
   paperCash: { EUR: seed },
-  daily: { date: "", pnlEur: 0, trades: 0, losses: 0 },
+  daily: { date: "", pnl: 0, pnlEur: 0, trades: 0, losses: 0 },
 };
 
 const journal = [];

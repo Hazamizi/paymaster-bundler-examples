@@ -21,7 +21,12 @@ import { sendAlert } from "./lib/alerts.mjs";
 import { appendJournal } from "./lib/journal.mjs";
 import { runStrategy } from "./strategies/index.mjs";
 import { runCalibration } from "./calibrate.mjs";
-import { applyPaperFill, defaultPaperSeed } from "./lib/paper-book.mjs";
+import {
+  addDailyPnl,
+  applyPaperFill,
+  dailyPnl,
+  defaultPaperSeed,
+} from "./lib/paper-book.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -99,7 +104,7 @@ let state = {
   positions: {},
   pending: {},
   paperCash: {},
-  daily: { date: "", pnlEur: 0, trades: 0, losses: 0 },
+  daily: { date: "", pnl: 0, pnlEur: 0, trades: 0, losses: 0 },
 };
 
 if (existsSync(statePath)) {
@@ -133,8 +138,10 @@ function todayUtc() {
 function ensureDaily() {
   const d = todayUtc();
   if (state.daily.date !== d) {
-    state.daily = { date: d, pnlEur: 0, trades: 0, losses: 0 };
+    state.daily = { date: d, pnl: 0, pnlEur: 0, trades: 0, losses: 0 };
     saveState();
+  } else if (state.daily.pnl == null && state.daily.pnlEur != null) {
+    state.daily.pnl = state.daily.pnlEur;
   }
 }
 
@@ -212,8 +219,9 @@ function dailyBlocked() {
   ensureDaily();
   const maxLoss = Number(cfg.maxDailyLossEur ?? 15);
   const maxTrades = Number(cfg.maxDailyTrades ?? 6);
-  if (state.daily.pnlEur <= -Math.abs(maxLoss)) {
-    return `daily loss cap €${Math.abs(maxLoss)} (now ${state.daily.pnlEur.toFixed(2)})`;
+  const pnl = dailyPnl(state.daily);
+  if (pnl <= -Math.abs(maxLoss)) {
+    return `daily loss cap ${Math.abs(maxLoss)} (now ${pnl.toFixed(2)})`;
   }
   if (state.daily.trades >= maxTrades) {
     return `daily trade cap ${maxTrades}`;
@@ -372,7 +380,7 @@ async function reconcilePending(product) {
       const frac = pending.sellFraction ?? 1;
 
       ensureDaily();
-      state.daily.pnlEur += pnlEur;
+      addDailyPnl(state.daily, pnlEur);
       state.daily.trades += 1;
       if (pnlEur < 0) state.daily.losses += 1;
 
@@ -656,52 +664,44 @@ async function evaluateProduct(product, balances) {
         return;
       }
 
-      // Dry-run via trade API (execute=true, TRADE_DRY_RUN): track lots only
-      if (signal === "buy") {
-        const spent = Number(quoteSize ?? cfg.quoteSize ?? 25);
-        const qty = spent / Number(price);
-        state.positions[product] = {
-          entry: Number(price),
-          qty,
-          quoteSpent: spent,
-          peakPrice: Number(price),
-          scaledOut: false,
-          openedAt: new Date().toISOString(),
-          entryRsi: meta.rsi,
-          paper: true,
-        };
-        state.daily.trades += 1;
-        saveState();
-      } else if (signal === "sell") {
-        const soldQty = Number(baseSize);
-        const entry = position?.entry ?? price;
-        const posQty = Number(position?.qty || soldQty);
-        const costBasis =
-          (Number(position?.quoteSpent) || entry * posQty) * (soldQty / posQty);
-        const pnlEur = soldQty * Number(price) - costBasis;
-        if (meta.markScaledOut && frac < 1 && position) {
-          state.positions[product] = {
-            ...position,
-            qty: Number(position.qty) * (1 - frac),
-            quoteSpent: Number(position.quoteSpent || 0) * (1 - frac),
-            scaledOut: true,
-            peakPrice: Math.max(position.peakPrice || position.entry, price),
-            paper: true,
-          };
-        } else {
-          delete state.positions[product];
-        }
-        state.daily.trades += 1;
-        state.daily.pnlEur += pnlEur;
-        if (pnlEur < 0) state.daily.losses += 1;
-        saveState();
-      }
-      journal({
-        event: `paper_${signal}`,
+      // Dry-run via trade API (execute=true, TRADE_DRY_RUN): track lots/PnL
+      // without virtual cash (sizing already used live balances).
+      ensureDaily();
+      const fill = applyPaperFill(state, {
+        signal,
         product,
+        quote,
         price,
+        quoteSize: quoteSize ?? cfg.quoteSize ?? 25,
+        baseSize,
+        position,
+        frac,
+        markScaledOut: Boolean(meta.markScaledOut),
         rsi: meta.rsi,
         reason: meta.reason,
+        updateCash: false,
+      });
+      if (!fill.ok) {
+        console.log(`  skip dry-run ${signal}: ${fill.reason}`);
+        delete state.cooldowns[key];
+        saveState();
+        return;
+      }
+      saveState();
+      journal({
+        event: fill.event,
+        product,
+        price,
+        qty: fill.qty,
+        spent: fill.spent,
+        proceeds: fill.proceeds,
+        entry: fill.entry,
+        pnlPct: fill.pnlPct,
+        pnl: fill.pnl,
+        pnlEur: fill.pnlEur,
+        rsi: meta.rsi,
+        reason: meta.reason,
+        dryRun: true,
       });
       return;
     }
@@ -771,7 +771,7 @@ async function evaluateProduct(product, balances) {
       const pnlPct = ((price - entry) / entry) * 100;
       const pnlEur = ((price - entry) / entry) * (position.quoteSpent || price * baseSize);
       ensureDaily();
-      state.daily.pnlEur += pnlEur;
+      addDailyPnl(state.daily, pnlEur);
       state.daily.trades += 1;
       if (pnlEur < 0) state.daily.losses += 1;
 
@@ -818,7 +818,7 @@ async function tick() {
   await ensureCalibration("daily");
   ensureDaily();
   console.log(
-    `  daily: trades=${state.daily.trades} pnl€=${state.daily.pnlEur.toFixed(2)} losses=${state.daily.losses}` +
+    `  daily: trades=${state.daily.trades} pnl=${dailyPnl(state.daily).toFixed(2)} losses=${state.daily.losses}` +
       (calibration?.calibratedAt
         ? ` · signals@${calibration.calibratedAt.slice(0, 10)}`
         : ""),
