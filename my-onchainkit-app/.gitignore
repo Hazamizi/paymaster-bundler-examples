@@ -46,6 +46,8 @@ algo/trades.journal.jsonl
 
 algo/signals.calibrated.json
 algo/paper-7day-report.json
+algo/paper-week-v2-report.json
+algo/paper-week-v2.config.json
 
 algo/instagram.recipient.json
 algo/instagram.webhook.jsonl
