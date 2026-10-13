@@ -9,6 +9,7 @@ import { fileURLToPath } from "url";
 import { spawnSync } from "child_process";
 import {
   applyPaperFill,
+  dailyPnl,
   defaultPaperSeed,
 } from "../algo/lib/paper-book.mjs";
 
@@ -149,6 +150,47 @@ function restore() {
     throw new Error(`expected insufficient paper EUR: ${JSON.stringify(buy)}`);
   }
   console.log("OK: paper-book rejects oversize buy");
+}
+
+// --- unit: updateCash:false tracks lots/PnL without touching paperCash ---
+{
+  const state = {
+    positions: {},
+    paperCash: { EUR: 100 },
+    daily: { date: "2099-01-01", pnlEur: 0, trades: 0, losses: 0 },
+  };
+  const buy = applyPaperFill(state, {
+    signal: "buy",
+    product: "ETH-EUR",
+    quote: "EUR",
+    price: 2000,
+    quoteSize: 50,
+    updateCash: false,
+  });
+  if (!buy.ok || state.paperCash.EUR !== 100) {
+    throw new Error(`dry-run buy should not debit cash: ${JSON.stringify(buy)}`);
+  }
+  const pos = state.positions["ETH-EUR"];
+  const sell = applyPaperFill(state, {
+    signal: "sell",
+    product: "ETH-EUR",
+    quote: "EUR",
+    price: 2200,
+    baseSize: pos.qty,
+    position: pos,
+    frac: 1,
+    updateCash: false,
+  });
+  if (!sell.ok || state.paperCash.EUR !== 100) {
+    throw new Error(`dry-run sell should not credit cash: ${JSON.stringify(sell)}`);
+  }
+  if (Math.abs(dailyPnl(state.daily) - 5) > 0.02 || state.daily.pnl !== state.daily.pnlEur) {
+    throw new Error(`dry-run pnl expected 5 with pnl aliases: ${JSON.stringify(state.daily)}`);
+  }
+  console.log("OK: dry-run fill tracks PnL without cash", {
+    cash: state.paperCash.EUR,
+    pnl: dailyPnl(state.daily),
+  });
 }
 
 const paperCfg = {

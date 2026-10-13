@@ -15,9 +15,28 @@ export function defaultPaperSeed(cfg, quote) {
   return Number(cfg.paperStartingCash ?? 1000);
 }
 
+/** Quote-agnostic daily realized PnL (keeps legacy `pnlEur` in sync). */
+export function dailyPnl(daily) {
+  if (!daily || typeof daily !== "object") return 0;
+  const n = Number(daily.pnl ?? daily.pnlEur);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Mutates daily: keeps `pnl` and legacy `pnlEur` aligned. */
+export function addDailyPnl(daily, delta) {
+  const next = Number((dailyPnl(daily) + Number(delta)).toFixed(4));
+  daily.pnl = next;
+  daily.pnlEur = next; // legacy alias
+  return next;
+}
+
 /**
- * Apply a simulated buy/sell to paperCash + positions + daily.
+ * Apply a simulated buy/sell to positions + daily (and optionally paperCash).
  * Mutates `state` in place; caller persists.
+ *
+ * @param {object} opts
+ * @param {boolean} [opts.updateCash=true] Debit/credit `paperCash`. Set false for
+ *   live dry-run (`execute=true` + TRADE_DRY_RUN) where sizing uses live balances.
  */
 export function applyPaperFill(state, {
   signal,
@@ -31,17 +50,22 @@ export function applyPaperFill(state, {
   markScaledOut = false,
   rsi = null,
   reason = null,
+  updateCash = true,
 }) {
   const daily = state.daily || {
     date: "",
+    pnl: 0,
     pnlEur: 0,
     trades: 0,
     losses: 0,
   };
+  // Normalize legacy state that only has pnlEur
+  if (daily.pnl == null && daily.pnlEur != null) daily.pnl = daily.pnlEur;
+  if (daily.pnlEur == null && daily.pnl != null) daily.pnlEur = daily.pnl;
   state.daily = daily;
   state.paperCash = state.paperCash || {};
-  const q = String(quote).toUpperCase();
-  if (state.paperCash[q] == null) state.paperCash[q] = 0;
+  const q = String(quote || "EUR").toUpperCase();
+  if (updateCash && state.paperCash[q] == null) state.paperCash[q] = 0;
 
   if (signal === "buy") {
     const spent = Number(quoteSize);
@@ -49,12 +73,14 @@ export function applyPaperFill(state, {
     if (!(spent > 0) || !(px > 0)) {
       return { ok: false, reason: "invalid buy size/price" };
     }
-    const have = Number(state.paperCash[q]) || 0;
-    if (have + 1e-9 < spent) {
-      return { ok: false, reason: `insufficient paper ${q}`, have, spent };
+    if (updateCash) {
+      const have = Number(state.paperCash[q]) || 0;
+      if (have + 1e-9 < spent) {
+        return { ok: false, reason: `insufficient paper ${q}`, have, spent };
+      }
+      state.paperCash[q] = Number((have - spent).toFixed(2));
     }
     const qty = spent / px;
-    state.paperCash[q] = Number((have - spent).toFixed(2));
     state.positions[product] = {
       entry: px,
       qty,
@@ -71,7 +97,8 @@ export function applyPaperFill(state, {
       event: "paper_buy",
       qty,
       spent,
-      paperCash: state.paperCash[q],
+      paperCash: updateCash ? state.paperCash[q] : undefined,
+      updateCash,
     };
   }
 
@@ -86,12 +113,14 @@ export function applyPaperFill(state, {
     const posQty = Number(position.qty);
     const costBasis =
       (Number(position.quoteSpent) || entry * posQty) * (soldQty / posQty);
-    const pnlEur = proceeds - costBasis;
+    const pnl = proceeds - costBasis;
     const pnlPct = ((px - entry) / entry) * 100;
 
-    state.paperCash[q] = Number(
-      ((Number(state.paperCash[q]) || 0) + proceeds).toFixed(2),
-    );
+    if (updateCash) {
+      state.paperCash[q] = Number(
+        ((Number(state.paperCash[q]) || 0) + proceeds).toFixed(2),
+      );
+    }
 
     if (markScaledOut && frac < 1) {
       const remainFrac = 1 - frac;
@@ -108,8 +137,8 @@ export function applyPaperFill(state, {
     }
 
     daily.trades += 1;
-    daily.pnlEur = Number((daily.pnlEur + pnlEur).toFixed(4));
-    if (pnlEur < 0) daily.losses += 1;
+    addDailyPnl(daily, pnl);
+    if (pnl < 0) daily.losses += 1;
 
     return {
       ok: true,
@@ -118,8 +147,10 @@ export function applyPaperFill(state, {
       proceeds,
       entry,
       pnlPct: Number(pnlPct.toFixed(3)),
-      pnlEur: Number(pnlEur.toFixed(4)),
-      paperCash: state.paperCash[q],
+      pnl: Number(pnl.toFixed(4)),
+      pnlEur: Number(pnl.toFixed(4)), // legacy
+      paperCash: updateCash ? state.paperCash[q] : undefined,
+      updateCash,
       reason,
     };
   }

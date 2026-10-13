@@ -11,7 +11,11 @@
 import { readFileSync, existsSync, writeFileSync, copyFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { applyPaperFill, defaultPaperSeed } from "./lib/paper-book.mjs";
+import {
+  applyPaperFill,
+  dailyPnl,
+  defaultPaperSeed,
+} from "./lib/paper-book.mjs";
 import { runStrategy } from "./strategies/index.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -103,13 +107,13 @@ function dayKey(unixSec) {
 function ensureDaily(state, unixSec) {
   const d = dayKey(unixSec);
   if (state.daily.date !== d) {
-    state.daily = { date: d, pnlEur: 0, trades: 0, losses: 0 };
+    state.daily = { date: d, pnl: 0, pnlEur: 0, trades: 0, losses: 0 };
   }
 }
 
 function dailyBlocked(state) {
-  if (state.daily.pnlEur <= -maxDailyLoss) {
-    return `daily loss cap €${maxDailyLoss}`;
+  if (dailyPnl(state.daily) <= -maxDailyLoss) {
+    return `daily loss cap ${maxDailyLoss}`;
   }
   if (state.daily.trades >= maxDailyTrades) {
     return `daily trade cap ${maxDailyTrades}`;
@@ -129,7 +133,7 @@ function markToMarket(state, lastPrices) {
 const state = {
   positions: {},
   paperCash: { EUR: seed },
-  daily: { date: "", pnlEur: 0, trades: 0, losses: 0 },
+  daily: { date: "", pnl: 0, pnlEur: 0, trades: 0, losses: 0 },
 };
 
 const journal = [];
